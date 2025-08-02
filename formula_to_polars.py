@@ -8,7 +8,7 @@ import datetime
 import warnings
 import math
 import numpy_financial as npf
-
+from functools import reduce
 
 class FormulaToPolarsListener(ExcelFormulaListener):
     def __init__(self):
@@ -27,6 +27,7 @@ class FormulaToPolarsListener(ExcelFormulaListener):
             'MOD': lambda args: f"({args[0]} % {args[1]})",
             'POWER': lambda args: f"({args[0]} ** {args[1]})",
             'SQRT': lambda args: f"sqrt({args[0]})",
+            'SUMPRODUCT': self._handle_sumproduct,
             # Statistical
             'MEDIAN': 'median',
             'STDEV': 'std',
@@ -129,6 +130,12 @@ class FormulaToPolarsListener(ExcelFormulaListener):
             return f"((({end_date} - {start_date}).dt.total_days() / 365.25).cast(pl.Int32, strict=False))"
         else:
             raise ValueError(f"Unsupported DATEDIF unit: {unit}")
+
+    def _handle_sumproduct(self, args):
+        if len(args) < 1:
+            raise ValueError("SUMPRODUCT requires at least one argument")
+        product_expr = reduce(lambda x, y: f"({x} * {y})", args)
+        return f"({product_expr}).sum()"
 
     def _handle_datedif_ash(self, args):
 
@@ -446,6 +453,12 @@ def run_tests():
             "formula": "=CUSTOM_DISCOUNT(Price, 10)",
             "new_column": "CustomDiscount",
             "expected_values": [90.0, 135.0, -45.0, 180.0]
+        },
+        # SUMPRODUCT
+        {
+            "formula": "=SUMPRODUCT(Price, Quantity)",
+            "new_column": "TotalValue",
+            "expected_values": [100.0 * 5 + 150.0 * 12 + (-50.0) * 8 + 200.0 * 15]
         }
     ]
 
