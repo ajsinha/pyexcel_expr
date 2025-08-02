@@ -9,6 +9,8 @@ import warnings
 import math
 import numpy_financial as npf
 from functools import reduce
+import importlib
+
 
 class FormulaToPolarsListener(ExcelFormulaListener):
     def __init__(self):
@@ -73,7 +75,25 @@ class FormulaToPolarsListener(ExcelFormulaListener):
             'IRR': self._handle_irr
         }
 
-    def register_custom_function(self, func_name: str, handler):
+    def register_custom_function(self, func_name: str, handler=None, module_path: str = None):
+        """Register a custom Excel-like function with a Polars handler or external Python function."""
+        if module_path:
+            try:
+                module_name, func = module_path.rsplit('.', 1)
+                module = importlib.import_module(module_name)
+                handler = getattr(module, func)
+                # Wrap external function to work with Polars Series
+                polars_handler = lambda \
+                    args: f"pl.struct({', '.join(f'arg{i}={arg}' for i, arg in enumerate(args))}).map_elements(lambda x: {module_path}({', '.join(f'x[\"arg{i}\"]' for i in range(len(args)))}), return_dtype=pl.Float64)"
+                self.function_map[func_name.upper()] = polars_handler
+            except (ImportError, AttributeError) as e:
+                raise ValueError(f"Failed to import function {module_path}: {str(e)}")
+        elif handler:
+            self.function_map[func_name.upper()] = handler
+        else:
+            raise ValueError("Either handler or module_path must be provided")
+
+    def register_custom_function_old(self, func_name: str, handler):
         """Register a custom Excel-like function with a Polars or Python handler."""
         self.function_map[func_name.upper()] = handler
 
@@ -275,14 +295,24 @@ class FormulaToPolarsListener(ExcelFormulaListener):
         return listener.stack[0]
 
     def apply_formula(self, df: pl.DataFrame, formula: str, new_column: str) -> pl.DataFrame:
+        import custom_functions
         polars_expr = self.convert_to_polars(formula)
         print(f'excel: {formula}, polars: {polars_expr}')
+        eval_globals = {'pl': pl, 'math': math, 'datetime': datetime, 'npf': npf, 'reduce': reduce}
+        try:
+            # Attempt to import custom_functions, but don't fail if it doesn't exist
+            custom_functions = importlib.import_module('custom_functions')
+            eval_globals['custom_functions'] = custom_functions
+        except ImportError:
+            pass  # If custom_functions.py doesn't exist, external functions will fail at registration
 
         try:
             return df.with_columns(
-                **{new_column: eval(polars_expr, {'pl': pl, 'math': math, 'datetime': datetime, 'npf': npf})})
+                **{new_column: eval(polars_expr, eval_globals)})
         except Exception as e:
             raise ValueError(f"Error applying formula {formula}: {str(e)}")
+
+
 
 
 def convert_to_polars(formula: str) -> str:
@@ -316,14 +346,27 @@ def create_sample_dataframe():
         "CashFlows": [[-1000, 300, 400, 500], [-2000, 600, 700, 800], [-500, 200, 300, 400], [-3000, 900, 1000, 1100]]
     })
 
-
+'''
 def apply_formula(df: pl.DataFrame, formula: str, new_column: str, listener: FormulaToPolarsListener = None) -> pl.DataFrame:
     polars_expr = convert_to_polars(formula, listener)
     try:
         return df.with_columns(**{new_column: eval(polars_expr, {'pl': pl, 'math': math, 'datetime': datetime, 'npf': npf})})
     except Exception as e:
         raise ValueError(f"Error applying formula {formula}: {str(e)}")
-
+'''
+def apply_formula(df: pl.DataFrame, formula: str, new_column: str, listener: FormulaToPolarsListener = None) -> pl.DataFrame:
+    polars_expr = convert_to_polars(formula, listener)
+    eval_globals = {'pl': pl, 'math': math, 'datetime': datetime, 'npf': npf, 'reduce': reduce}
+    try:
+        # Attempt to import custom_functions, but don't fail if it doesn't exist
+        custom_functions = importlib.import_module('custom_functions')
+        eval_globals['custom_functions'] = custom_functions
+    except ImportError:
+        pass  # If custom_functions.py doesn't exist, external functions will fail at registration
+    try:
+        return df.with_columns(**{new_column: eval(polars_expr, eval_globals)})
+    except Exception as e:
+        raise ValueError(f"Error applying formula {formula}: {str(e)}")
 
 # Test suite
 def run_tests():
@@ -334,6 +377,12 @@ def run_tests():
     listener.register_custom_function(
         'CUSTOM_DISCOUNT',
         lambda args: f"({args[0]} * (1 - {args[1]} / 100)).cast(pl.Float64)"
+    )
+
+    # Register an external function
+    listener.register_custom_function(
+        'WEIGHTED_AVERAGE',
+        module_path='custom_functions.weighted_average'
     )
 
     test_cases = [
@@ -459,6 +508,12 @@ def run_tests():
             "formula": "=SUMPRODUCT(Price, Quantity)",
             "new_column": "TotalValue",
             "expected_values": [100.0 * 5 + 150.0 * 12 + (-50.0) * 8 + 200.0 * 15]
+        },
+        # External function
+        {
+            "formula": "=WEIGHTED_AVERAGE(Price, Quantity)",
+            "new_column": "WeightedAvg",
+            "expected_values": [(100.0 * 5 + 150.0 * 12 + (-50.0) * 8 + 200.0 * 15) / (5 + 12 + 8 + 15)]
         }
     ]
 
